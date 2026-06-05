@@ -30,6 +30,142 @@ from datetime import datetime, timedelta
 
 
 # ============================================================================
+# SECTION 0: PARIS TRAVEL-TIME MATRIX & LOGISTICS DATA
+# ============================================================================
+
+# District definitions: Paris medical delivery zones
+DISTRICTS = {
+    "Warehouse": (2.35, 48.87),        # Central warehouse (Le Marais area)
+    "North_Paris": (2.36, 48.90),      # North Paris (10th-11th arrondissements)
+    "East_Paris": (2.42, 48.86),       # East Paris (20th arrondissement)
+    "Southeast": (2.40, 48.82),        # Southeast (12th-13th arrondissements)
+    "Southwest": (2.30, 48.82),        # Southwest (13th-14th arrondissements)
+    "West_Paris": (2.25, 48.85),       # West Paris (6th-7th arrondissements)
+}
+
+# Travel time matrix: minutes between districts by time of day
+# Based on Paris real-world traffic patterns
+TRAVEL_TIME_MATRIX = {
+    # Morning rush (7-10am): Slower due to congestion
+    ("Warehouse", "North_Paris", "morning_rush"): 32,
+    ("Warehouse", "East_Paris", "morning_rush"): 28,
+    ("Warehouse", "Southeast", "morning_rush"): 26,
+    ("Warehouse", "Southwest", "morning_rush"): 24,
+    ("Warehouse", "West_Paris", "morning_rush"): 22,
+    ("North_Paris", "East_Paris", "morning_rush"): 20,
+    ("North_Paris", "Southeast", "morning_rush"): 22,
+    ("North_Paris", "Southwest", "morning_rush"): 28,
+    ("North_Paris", "West_Paris", "morning_rush"): 26,
+    ("East_Paris", "Southeast", "morning_rush"): 18,
+    ("East_Paris", "Southwest", "morning_rush"): 30,
+    ("East_Paris", "West_Paris", "morning_rush"): 32,
+    ("Southeast", "Southwest", "morning_rush"): 24,
+    ("Southeast", "West_Paris", "morning_rush"): 30,
+    ("Southwest", "West_Paris", "morning_rush"): 20,
+    
+    # Mid-morning (10am-12pm): Normal traffic
+    ("Warehouse", "North_Paris", "mid_morning"): 20,
+    ("Warehouse", "East_Paris", "mid_morning"): 18,
+    ("Warehouse", "Southeast", "mid_morning"): 16,
+    ("Warehouse", "Southwest", "mid_morning"): 14,
+    ("Warehouse", "West_Paris", "mid_morning"): 12,
+    ("North_Paris", "East_Paris", "mid_morning"): 14,
+    ("North_Paris", "Southeast", "mid_morning"): 16,
+    ("North_Paris", "Southwest", "mid_morning"): 18,
+    ("North_Paris", "West_Paris", "mid_morning"): 16,
+    ("East_Paris", "Southeast", "mid_morning"): 12,
+    ("East_Paris", "Southwest", "mid_morning"): 20,
+    ("East_Paris", "West_Paris", "mid_morning"): 22,
+    ("Southeast", "Southwest", "mid_morning"): 16,
+    ("Southeast", "West_Paris", "mid_morning"): 20,
+    ("Southwest", "West_Paris", "mid_morning"): 14,
+    
+    # Afternoon (12pm-5pm): Light traffic
+    ("Warehouse", "North_Paris", "afternoon"): 16,
+    ("Warehouse", "East_Paris", "afternoon"): 14,
+    ("Warehouse", "Southeast", "afternoon"): 12,
+    ("Warehouse", "Southwest", "afternoon"): 10,
+    ("Warehouse", "West_Paris", "afternoon"): 10,
+    ("North_Paris", "East_Paris", "afternoon"): 12,
+    ("North_Paris", "Southeast", "afternoon"): 14,
+    ("North_Paris", "Southwest", "afternoon"): 16,
+    ("North_Paris", "West_Paris", "afternoon"): 14,
+    ("East_Paris", "Southeast", "afternoon"): 10,
+    ("East_Paris", "Southwest", "afternoon"): 16,
+    ("East_Paris", "West_Paris", "afternoon"): 18,
+    ("Southeast", "Southwest", "afternoon"): 12,
+    ("Southeast", "West_Paris", "afternoon"): 16,
+    ("Southwest", "West_Paris", "afternoon"): 12,
+}
+
+def get_time_bucket(time_minutes: int) -> str:
+    """
+    Determine time-of-day bucket for travel time lookup.
+    
+    Args:
+        time_minutes: Minutes from start of day (0 = 00:00)
+    
+    Returns:
+        "morning_rush", "mid_morning", or "afternoon"
+    """
+    # 6am-10am: morning rush (360-600 minutes) — includes early warehouse departures
+    if 360 <= time_minutes < 600:
+        return "morning_rush"
+    # 10am-12pm: mid morning (600-720 minutes)
+    elif 600 <= time_minutes < 720:
+        return "mid_morning"
+    # 12pm-5pm: afternoon (720-1020 minutes)
+    else:
+        return "afternoon"  # Default for off-peak
+
+def get_travel_time(from_district: str, to_district: str, departure_time_minutes: int) -> float:
+    """
+    Get travel time between two districts at a given time of day.
+    
+    Args:
+        from_district: Origin district name (must exist in DISTRICTS)
+        to_district: Destination district name
+        departure_time_minutes: When vehicle departs (minutes from day start)
+    
+    Returns:
+        Travel time in minutes (float)
+    """
+    if from_district == to_district:
+        return 0.0
+    
+    time_bucket = get_time_bucket(departure_time_minutes)
+    
+    # Try direct lookup
+    key = (from_district, to_district, time_bucket)
+    if key in TRAVEL_TIME_MATRIX:
+        return float(TRAVEL_TIME_MATRIX[key])
+    
+    # Try reverse lookup (symmetric assumption)
+    key_reverse = (to_district, from_district, time_bucket)
+    if key_reverse in TRAVEL_TIME_MATRIX:
+        return float(TRAVEL_TIME_MATRIX[key_reverse])
+    
+    # Fallback: rough Haversine-based estimate (shouldn't happen with complete matrix)
+    from math import radians, cos, sin, asin, sqrt
+    lat1, lon1 = DISTRICTS[from_district]
+    lat2, lon2 = DISTRICTS[to_district]
+    lon1, lat1, lon2, lat2 = map(radians, [lon1, lat1, lon2, lat2])
+    dlon = lon2 - lon1
+    dlat = lat2 - lat1
+    a = sin(dlat/2)**2 + cos(lat1) * cos(lat2) * sin(dlon/2)**2
+    c = 2 * asin(sqrt(a))
+    km = 6371 * c
+    minutes = km * 3  # Rough estimate: 3 min per km in Paris
+    if time_bucket == "morning_rush":
+        minutes *= 1.3
+    elif time_bucket == "mid_morning":
+        minutes *= 1.0
+    else:
+        minutes *= 0.9
+    return minutes
+
+
+# ============================================================================
 # SECTION 1: DATA STRUCTURES
 # ============================================================================
 
@@ -47,7 +183,7 @@ class Delivery:
         late_time: Latest delivery time (minutes from start of day, e.g., 540 = 9am)
         is_hard_window: If True, time window is a hard constraint; if False, it's soft preference
         load_time: When this delivery was loaded (in minutes from day start, or None if not loaded)
-        x, y: Synthetic coordinates for sequencing and travel-time estimation
+        district: Paris district where delivery goes (e.g., "North_Paris")
         service_time: Estimated service time on site in minutes (5-30)
     """
     id: str
@@ -58,9 +194,7 @@ class Delivery:
     late_time: int = 1080  # Default 6:00 PM (1080 minutes from 0:00)
     is_hard_window: bool = False  # Default: soft constraint
     load_time: int = None  # Minutes from day start when loaded (for 24-hour rule)
-    # Simple synthetic coordinates (x,y) for sequencing and travel-time estimation
-    x: float = 0.0
-    y: float = 0.0
+    district: str = "Warehouse"  # Paris district (for travel-time matrix lookup)
     # Estimated service time on site in minutes (5-30)
     service_time: int = 5
 
@@ -323,11 +457,10 @@ def generate_deliveries(num_deliveries: int) -> List[Delivery]:
         )
         deliveries.append(delivery)
     
-    # Assign simple synthetic coordinates (a rough Paris-like bbox) and service times
+    # Assign districts and service times
+    district_list = [d for d in DISTRICTS.keys() if d != "Warehouse"]
     for d in deliveries:
-        # coordinates in a 0..20 square (not real coords — for demo sequencing only)
-        d.x = random.uniform(0, 20)
-        d.y = random.uniform(0, 20)
+        d.district = random.choice(district_list)  # Random Paris district
         if d.type == "Hospital":
             d.service_time = random.randint(20, 30)
         elif d.type == "Temperature-Sensitive":
@@ -393,28 +526,38 @@ def assign_deliveries(
     unassigned_reasons: Dict[str, str] = {}
     
     # Helper function to estimate arrival time and travel minutes for a delivery
-    def estimate_arrival_and_travel(van: Vehicle, delivery: Delivery, time_of_day: str = "morning") -> Tuple[int, float]:
+    def estimate_arrival_and_travel(van: Vehicle, delivery: Delivery) -> Tuple[int, float]:
         """
         Estimate when this delivery would arrive if added to van's current route.
+        Uses real Paris travel-time matrix.
         
         Returns:
-            (arrival_time_minutes, travel_time_minutes)
+            (arrival_time_minutes, travel_plus_service_minutes)
         """
-        # Simple heuristic: current van time is based on how many deliveries are already assigned
-        # and average service time + travel
         if not van.assigned_deliveries:
-            # First delivery: start at 6am + loading time
-            start_minutes = van.driver_start_time + 30
+            # First delivery: start at warehouse, depart after loading (6:30am)
+            current_time = van.driver_start_time + 30
+            last_district = "Warehouse"
         else:
-            # Estimate based on current deliveries: rough sum of service times + travel time estimate
+            # Estimate based on current deliveries
             current_time = van.driver_start_time + 30  # Loading time
+            last_delivery = van.assigned_deliveries[-1]
+            last_district = last_delivery.district
+            
             for d in van.assigned_deliveries:
-                current_time += d.service_time + 15  # 15 min avg travel to next stop
-            start_minutes = current_time
+                current_time += d.service_time
+                # Add travel time from previous stop to this stop
+                if d != van.assigned_deliveries[0]:
+                    prev_d = van.assigned_deliveries[van.assigned_deliveries.index(d) - 1]
+                    travel = get_travel_time(prev_d.district, d.district, current_time)
+                    current_time += travel
         
-        travel = estimate_travel_minutes((0, 0), (delivery.x, delivery.y), time_of_day)
-        arrival = start_minutes + travel
-        return arrival, travel + delivery.service_time
+        # Travel from last location to this delivery
+        travel_to_delivery = get_travel_time(last_district, delivery.district, current_time)
+        arrival_time = current_time + travel_to_delivery
+        travel_plus_service = travel_to_delivery + delivery.service_time
+        
+        return arrival_time, travel_plus_service
     
     # ========================================================================
     # PRIORITY 1: Temperature-Sensitive → Refrigerated Van ONLY
@@ -525,45 +668,110 @@ def assign_deliveries(
     return fleet, unassigned_deliveries, unassigned_reasons
 
 
-# ------------------------------------------------------------------------------
-# Simple sequencing: nearest-neighbour ordering starting from warehouse (0,0)
-# ------------------------------------------------------------------------------
-def euclidean(a: Tuple[float, float], b: Tuple[float, float]) -> float:
-    return ((a[0]-b[0])**2 + (a[1]-b[1])**2) ** 0.5
+
+# ============================================================================
+# SECTION 4: EXPLAINABILITY ENGINE
+# ============================================================================
+
+def generate_explainability_report(delivery: Delivery, fleet: Dict[str, Vehicle], constraint_reason: str) -> Dict:
+    """
+    Generate a detailed explanation of why a delivery was deferred.
+    
+    Returns a dict with:
+    - primary_reason: The constraint that blocked this delivery
+    - affected_vans: Which vans couldn't accommodate it and why
+    - best_fit_van: The van that came closest to accepting it
+    - what_would_unblock: How many hours/boxes would need to free up
+    """
+    report = {
+        "delivery_id": delivery.id,
+        "delivery_type": delivery.type,
+        "primary_reason": constraint_reason,
+        "affected_vans": [],
+        "best_fit_van": None,
+        "what_would_unblock": None,
+    }
+    
+    # Analyze each van to understand why it couldn't take this delivery
+    best_fit_margin = float('-inf')
+    
+    for van_id, van in fleet.items():
+        if van.capacity == 0:
+            continue
+        
+        arrival_time, added_minutes = (0, 0)  # Dummy for now
+        feasible, reason = check_all_constraints(delivery, van, arrival_time, added_minutes)
+        
+        if not feasible:
+            capacity_check = van.current_load + delivery.boxes <= van.capacity
+            hours_remaining = van.driver_hours_limit - van.driver_hours_used
+            
+            report["affected_vans"].append({
+                "van_id": van_id,
+                "constraint_failed": reason,
+                "capacity_available": van.capacity - van.current_load,
+                "hours_remaining": hours_remaining,
+                "van_type": van.type,
+            })
+            
+            # Track best fit (closest to having capacity)
+            if capacity_check:  # Capacity is OK, must be hours
+                margin = hours_remaining - (added_minutes / 60.0)
+            else:
+                margin = van.capacity - van.current_load - delivery.boxes
+            
+            if margin > best_fit_margin:
+                best_fit_margin = margin
+                report["best_fit_van"] = van_id
+    
+    # Suggest what would unblock this delivery
+    if "Driver hours" in constraint_reason:
+        # Need more driving hours
+        total_deficit = 0.0
+        for van_info in report["affected_vans"]:
+            if "Driver hours" in van_info["constraint_failed"]:
+                total_deficit += abs(van_info["hours_remaining"])
+        report["what_would_unblock"] = f"Free up {total_deficit:.1f}h total driver time across vans"
+    elif "Capacity" in constraint_reason:
+        # Need more box capacity
+        total_deficit = 0
+        for van_info in report["affected_vans"]:
+            if "Capacity" in van_info["constraint_failed"]:
+                total_deficit += delivery.boxes - van_info["capacity_available"]
+        report["what_would_unblock"] = f"Free up {total_deficit} boxes total across vans"
+    
+    return report
 
 
-def estimate_travel_minutes(a: Tuple[float, float], b: Tuple[float, float], time_of_day: str = "morning") -> float:
-    # Simple distance to minutes conversion. Scale factor tuned for demo.
-    dist = euclidean(a, b)
-    # baseline: 1 distance unit -> 3 minutes
-    minutes = dist * 3.0
-    # time-of-day multiplier (morning slightly faster, late_morning slower)
-    if time_of_day == "late_morning":
-        minutes *= 1.6
-    return minutes
-
-
-def sequence_route_for_vehicle(van: Vehicle, time_of_day: str = "morning") -> Tuple[List[Delivery], float]:
-    # Start at warehouse coordinate (0,0)
+def sequence_route_for_vehicle(van: Vehicle) -> Tuple[List[Delivery], float]:
+    """
+    Sequence deliveries for a vehicle using nearest-district heuristic with travel-time matrix.
+    """
     remaining = van.assigned_deliveries.copy()
     route: List[Delivery] = []
-    current = (0.0, 0.0)
-    total_minutes = 30.0  # include loading time estimate (30 min)
+    current_district = "Warehouse"
+    total_minutes = 30.0  # Loading time
+    current_time = van.driver_start_time + 30  # 6:30am departure from warehouse
 
     while remaining:
-        # find nearest
-        nearest = min(remaining, key=lambda d: euclidean(current, (d.x, d.y)))
-        # travel to nearest
-        travel = estimate_travel_minutes(current, (nearest.x, nearest.y), time_of_day)
+        # Find nearest unvisited district (by travel time)
+        nearest = min(
+            remaining,
+            key=lambda d: get_travel_time(current_district, d.district, current_time)
+        )
+        # Travel to nearest
+        travel = get_travel_time(current_district, nearest.district, current_time)
         total_minutes += travel
-        # add service time
+        current_time += travel
+        # Service at location
         total_minutes += nearest.service_time
+        current_time += nearest.service_time
         route.append(nearest)
-        current = (nearest.x, nearest.y)
+        current_district = nearest.district
         remaining.remove(nearest)
 
-    # return to warehouse (optional)
-    back_minutes = estimate_travel_minutes(current, (0.0, 0.0), time_of_day)
+    # Return to warehouse
+    back_minutes = get_travel_time(current_district, "Warehouse", current_time)
     total_minutes += back_minutes
 
     return route, total_minutes
@@ -809,11 +1017,11 @@ def main():
                             st.write(f"  • {delivery_type}: {count}")
 
                         # Sequence the route for this vehicle and show estimated time
-                        route, est_minutes = sequence_route_for_vehicle(van, time_of_day=("late_morning" if random.random() < 0.2 else "morning"))
+                        route, est_minutes = sequence_route_for_vehicle(van)
                         st.markdown(f"**Estimated route time:** {int(est_minutes)} minutes (incl. loading and service)")
                         st.markdown("**Route (first 10 stops):**")
                         for stop in route[:10]:
-                            st.write(f"  • {stop.id} | {stop.type} | {stop.boxes} boxes | svc {stop.service_time}m")
+                            st.write(f"  • {stop.id} | {stop.type} | {stop.boxes} boxes | {stop.district} | svc {stop.service_time}m")
                     else:
                         st.write("*No deliveries assigned*")
         
@@ -857,11 +1065,11 @@ def main():
                             st.write(f"  • {delivery_type}: {count}")
 
                         # Sequence the route for this vehicle and show estimated time
-                        route, est_minutes = sequence_route_for_vehicle(van, time_of_day=("late_morning" if random.random() < 0.2 else "morning"))
+                        route, est_minutes = sequence_route_for_vehicle(van)
                         st.markdown(f"**Estimated route time:** {int(est_minutes)} minutes (incl. loading and service)")
                         st.markdown("**Route (first 10 stops):**")
                         for stop in route[:10]:
-                            st.write(f"  • {stop.id} | {stop.type} | {stop.boxes} boxes | svc {stop.service_time}m")
+                            st.write(f"  • {stop.id} | {stop.type} | {stop.boxes} boxes | {stop.district} | svc {stop.service_time}m")
                     else:
                         st.write("*No deliveries assigned*")
         
