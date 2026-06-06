@@ -838,6 +838,83 @@ def repair_assign_from_van(original_fleet: Dict[str, Vehicle], disrupted_van_id:
 
     return fleet, unassigned, reasons
 
+# ============================================================================
+# PHASE 3: COMPLEMENTARY LOGISTICS LOGIC
+# ============================================================================
+
+def parse_csv_orders(file_contents: str) -> Tuple[List[Delivery], List[str]]:
+    """CSV parser engine for real client order sheets."""
+    deliveries = []
+    errors = []
+    try:
+        df = pd.read_csv(io.StringIO(file_contents))
+        required_cols = ["id", "type", "boxes", "district"]
+        for col in required_cols:
+            if col not in df.columns:
+                return [], [f"Missing column check: '{col}'"]
+
+        for idx, row in df.iterrows():
+            row_id = str(row.get("id", f"ROW-{idx}"))
+            dtype = str(row.get("type", "Pharmacy"))
+            if dtype not in ["Hospital", "Temperature-Sensitive", "Pharmacy"]:
+                dtype = "Pharmacy"
+            
+            try:
+                boxes = int(row.get("boxes", 1))
+                if boxes <= 0: boxes = 1
+            except ValueError:
+                boxes = 1
+
+            district = str(row.get("district", "North_Paris"))
+            if district not in DISTRICTS:
+                district = "North_Paris"
+
+            tw_str = str(row.get("time_window", "same-day"))
+            early, late, is_hard = 360, 1080, False
+            if dtype == "Hospital":
+                early, late, is_hard = 360, 540, True
+                tw_str = "before 9am (STRICT)"
+
+            svc_time = int(row.get("service_time", 10)) if "service_time" in df.columns else 10
+
+            deliveries.append(Delivery(
+                id=row_id, type=dtype, boxes=boxes, time_window=tw_str,
+                early_time=early, late_time=late, is_hard_window=is_hard,
+                load_time=360, district=district, service_time=svc_time
+            ))
+    except Exception as e:
+        return [], [f"Parsing mistake: {str(e)}"]
+    return deliveries, errors
+
+
+def run_benchmark_suite(deliveries: List[Delivery]) -> Dict[str, Dict]:
+    """Automated benchmark tests running cross-strategy metrics updates."""
+    scenarios = {
+        "Normal Operation": {"sick_driver": False, "fridge_breakdown": False},
+        "Sick Driver Scenario": {"sick_driver": True, "fridge_breakdown": False},
+        "Fridge Breakdown": {"sick_driver": False, "fridge_breakdown": True}
+    }
+    results = {}
+    for name, config in scenarios.items():
+        fleet = create_fleet()
+        up_fleet, unassigned, _ = assign_deliveries(copy.deepcopy(deliveries), fleet, config)
+        
+        total = len(deliveries)
+        assigned = total - len(unassigned)
+        hosp_total = len([d for d in deliveries if d.type == "Hospital"])
+        hosp_unassigned = len([d for d in unassigned if d.type == "Hospital"])
+        
+        total_cap = sum(v.capacity for v in up_fleet.values() if v.capacity > 0)
+        total_load = sum(v.current_load for v in up_fleet.values())
+        util = (total_load / total_cap * 100) if total_cap > 0 else 0
+
+        results[name] = {
+            "success_rate": (assigned / total * 100) if total > 0 else 0,
+            "deferred_count": len(unassigned),
+            "hospital_hit_rate": ((hosp_total - hosp_unassigned) / hosp_total * 100) if hosp_total > 0 else 100,
+            "capacity_utilization": util
+        }
+    return results
 
 # ============================================================================
 # SECTION 4: STREAMLIT UI / USER EXPERIENCE
@@ -934,7 +1011,10 @@ def main():
         assigned_count = total_deliveries - len(unassigned)
         failed_count = len(unassigned)
         assignment_rate = (assigned_count / total_deliveries * 100) if total_deliveries > 0 else 0
-        
+
+        st.session_state.fleet = fleet
+        st.session_state.deliveries = deliveries
+
         # ================================================================
         # TOP SECTION: KEY PERFORMANCE INDICATORS
         # ================================================================
@@ -1187,7 +1267,10 @@ def main():
         # Store state in session for reference
         st.session_state.fleet = fleet
         st.session_state.deliveries = deliveries
-    
+
+        # Phase 4 sections (appended below existing UI)
+        phase4_render(fleet, deliveries, unassigned, unassigned_reasons)
+
     else:
         # Default state: show instructions
         st.info(
@@ -1197,6 +1280,291 @@ def main():
             "3. Click 'Generate Monday Dispatch Plan' to run the algorithm\n\n"
             "Watch how the system handles constraints and protects critical deliveries!"
         )
+
+        
+
+
+# ============================================================================
+# PHASE 4: EXPLAINABILITY PANEL
+# ============================================================================
+
+def phase4_explainability_panel(unassigned, unassigned_reasons, fleet):
+    """
+    Phase 4 — Explainability Panel.
+    Shows a detailed per-delivery breakdown of why each deferred order
+    could not be assigned, and what would be needed to fix it.
+    Uses the existing generate_explainability_report() engine from Phase 2.
+    """
+    st.markdown("### 🔍 Explainability Panel")
+    st.caption("Detailed breakdown of why each deferred delivery could not be assigned.")
+
+    if not unassigned:
+        st.success("✅ All deliveries were assigned — nothing to explain.")
+        return
+
+    # Summary counts
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Total Deferred", len(unassigned))
+    critical = sum(1 for d in unassigned if d.type in ("Hospital", "Temperature-Sensitive"))
+    c2.metric("⚠️ Critical Deferred", critical)
+    c3.metric("Pharmacy Deferred", sum(1 for d in unassigned if d.type == "Pharmacy"))
+
+    if critical > 0:
+        st.error("🚨 Critical deliveries were deferred — immediate action required!")
+
+    # Group by simplified reason category
+    groups = {}
+    for d in unassigned:
+        r = unassigned_reasons.get(d.id, "Unknown")
+        if "Driver hours" in r:
+            cat = "Driver Hours Limit"
+        elif "Capacity" in r:
+            cat = "Capacity Exceeded"
+        elif "Time window" in r:
+            cat = "Time Window Violation"
+        elif "24-hour" in r:
+            cat = "24-Hour Transit Rule"
+        else:
+            cat = "No Available Vehicle"
+        groups.setdefault(cat, []).append(d)
+
+    for cat, items in sorted(groups.items()):
+        with st.expander(f"**{cat}** — {len(items)} order(s)", expanded=True):
+            for d in items:
+                full_reason = unassigned_reasons.get(d.id, "Unknown")
+                report = generate_explainability_report(d, fleet, full_reason)
+                st.markdown(
+                    f"**{d.id}** | {d.type} | {d.boxes} boxes | {d.district} | "
+                    f"Window: {minutes_to_hm(d.early_time)}–{minutes_to_hm(d.late_time)}"
+                )
+                st.markdown(f"- **Root cause:** {full_reason}")
+                if report["best_fit_van"]:
+                    st.markdown(f"- **Closest van:** {report['best_fit_van']}")
+                if report["what_would_unblock"]:
+                    st.markdown(f"- **To unblock:** {report['what_would_unblock']}")
+                st.markdown("---")
+
+
+# ============================================================================
+# PHASE 4: LAST-MINUTE INSERTION
+# ============================================================================
+
+def phase4_insert_last_minute_order(fleet, current_deliveries):
+    """
+    Phase 4 — Last-Minute Insertion.
+    Lets the dispatcher add a single new order after the morning plan is already
+    generated. Tries to insert it into the best available van using the same
+    priority rules as the main algorithm, and reports the result.
+
+    Args:
+        fleet: Current fleet dict (from session state)
+        current_deliveries: Current delivery list (from session state)
+
+    Returns:
+        updated_fleet, updated_deliveries, result_message (str), success (bool)
+    """
+    district_list = [d for d in DISTRICTS.keys() if d != "Warehouse"]
+
+    # Try each candidate van in priority order based on delivery type
+    def try_insert(delivery, vans):
+        for van in vans:
+            if van.capacity == 0:
+                continue
+            # Simple capacity + hours check
+            est_travel = 20.0  # conservative estimate
+            added_minutes = est_travel + delivery.service_time
+            feasible, reason = check_all_constraints(delivery, van, van.driver_start_time + 60, added_minutes)
+            if feasible:
+                van.current_load += delivery.boxes
+                van.assigned_deliveries.append(delivery)
+                van.driver_hours_used += added_minutes / 60.0
+                return True, van.id, ""
+            last_reason = reason
+        return False, None, last_reason
+
+    large_vans = [fleet["Large-Van-1"], fleet["Large-Van-2"]]
+    small_vans = [fleet["Small-Van-1"], fleet["Small-Van-2"], fleet["Small-Van-3"]]
+    fridge_van = fleet["Refrigerated-Van-1"]
+
+    st.markdown("### 🚨 Last-Minute Order Insertion")
+    st.caption("Add a new delivery order to the existing plan after it has already been generated.")
+
+    with st.form("last_minute_form"):
+        col1, col2 = st.columns(2)
+        with col1:
+            new_type = st.selectbox("Delivery Type", ["Hospital", "Temperature-Sensitive", "Pharmacy"])
+            new_boxes = st.number_input("Number of Boxes", min_value=1, max_value=10, value=2)
+        with col2:
+            new_district = st.selectbox("District", district_list)
+            new_service = st.number_input("Service Time (minutes)", min_value=5, max_value=30, value=10)
+        submitted = st.form_submit_button("➕ Insert Order into Plan")
+
+    if submitted:
+        # Build the new delivery object
+        new_id = f"LASTMIN-{random.randint(100, 999)}"
+        if new_type == "Hospital":
+            new_delivery = Delivery(
+                id=new_id, type="Hospital", boxes=new_boxes,
+                time_window="before 9am (STRICT)",
+                early_time=360, late_time=540, is_hard_window=True,
+                load_time=360, district=new_district, service_time=new_service
+            )
+            ok, van_id, reason = try_insert(new_delivery, large_vans)
+            if not ok:
+                ok, van_id, reason = try_insert(new_delivery, small_vans)
+        elif new_type == "Temperature-Sensitive":
+            new_delivery = Delivery(
+                id=new_id, type="Temperature-Sensitive", boxes=new_boxes,
+                time_window="same-day (urgent)",
+                early_time=360, late_time=1080, is_hard_window=False,
+                load_time=360, district=new_district, service_time=new_service
+            )
+            ok, van_id, reason = try_insert(new_delivery, [fridge_van])
+        else:
+            new_delivery = Delivery(
+                id=new_id, type="Pharmacy", boxes=new_boxes,
+                time_window="same-day (flexible)",
+                early_time=360, late_time=1080, is_hard_window=False,
+                load_time=360, district=new_district, service_time=new_service
+            )
+            ok, van_id, reason = try_insert(new_delivery, small_vans)
+            if not ok:
+                ok, van_id, reason = try_insert(new_delivery, large_vans)
+
+        if ok:
+            current_deliveries.append(new_delivery)
+            st.success(f"✅ Order **{new_id}** inserted into **{van_id}** successfully!")
+            st.session_state.fleet = fleet
+            st.session_state.deliveries = current_deliveries
+        else:
+            st.error(f"❌ Could not insert order **{new_id}**. Reason: {reason}")
+
+    return fleet, current_deliveries
+
+
+# ============================================================================
+# PHASE 4: ROUTE RE-OPTIMIZATION POST-DISRUPTION
+# ============================================================================
+
+def phase4_reoptimize_after_disruption(fleet):
+    """
+    Phase 4 — Route Re-Optimization Post-Disruption.
+    After a van breaks down or a driver calls in sick, this goes beyond the
+    simple repair (capacity-only check) and re-sequences all affected routes
+    using the nearest-district heuristic with the travel-time matrix.
+    Also reports which deliveries were moved and the new estimated route times.
+
+    Args:
+        fleet: Current fleet dict (from session state)
+    """
+    st.markdown("### 🔄 Route Re-Optimization Post-Disruption")
+    st.caption(
+        "More advanced than the basic repair: after removing a van, this re-sequences "
+        "all remaining routes using the travel-time matrix for tighter estimates."
+    )
+
+    disrupted_van = st.selectbox(
+        "Select van that went out of service:",
+        list(fleet.keys()),
+        key="phase4_reopt_van"
+    )
+
+    if st.button("🔄 Re-Optimize All Routes", key="phase4_reopt_btn"):
+        # Step 1: pull deliveries off the disrupted van
+        working_fleet = copy.deepcopy(fleet)
+        disrupted = working_fleet[disrupted_van]
+        deliveries_to_redistribute = disrupted.assigned_deliveries.copy()
+        disrupted.assigned_deliveries = []
+        disrupted.current_load = 0
+        disrupted.capacity = 0
+
+        remaining_vans = [v for k, v in working_fleet.items() if k != disrupted_van and v.capacity > 0]
+
+        moved_log = []
+        could_not_place = []
+
+        # Step 2: insert each displaced delivery into the best remaining van
+        for d in deliveries_to_redistribute:
+            best_van = None
+            best_extra_time = float("inf")
+
+            for van in remaining_vans:
+                if van.current_load + d.boxes > van.capacity:
+                    continue
+                # Estimate extra time to add this delivery to this van
+                if van.assigned_deliveries:
+                    last_dist = van.assigned_deliveries[-1].district
+                else:
+                    last_dist = "Warehouse"
+                current_t = van.driver_start_time + int(van.driver_hours_used * 60)
+                extra = get_travel_time(last_dist, d.district, current_t) + d.service_time
+                new_hours = van.driver_hours_used + extra / 60.0
+                if new_hours > van.driver_hours_limit:
+                    continue
+                if extra < best_extra_time:
+                    best_extra_time = extra
+                    best_van = van
+
+            if best_van:
+                best_van.current_load += d.boxes
+                best_van.assigned_deliveries.append(d)
+                best_van.driver_hours_used += best_extra_time / 60.0
+                moved_log.append((d.id, d.type, best_van.id))
+            else:
+                could_not_place.append(d)
+
+        # Step 3: re-sequence all routes
+        st.markdown(f"**Disrupted van:** {disrupted_van} — {len(deliveries_to_redistribute)} deliveries redistributed")
+
+        if moved_log:
+            st.markdown("**Moved deliveries:**")
+            for did, dtype, vid in moved_log:
+                st.write(f"  • {did} ({dtype}) → {vid}")
+
+        if could_not_place:
+            st.warning(f"⚠️ {len(could_not_place)} delivery(ies) could not be placed in any remaining van:")
+            for d in could_not_place:
+                st.write(f"  • {d.id} ({d.type}, {d.boxes} boxes)")
+        else:
+            st.success("✅ All displaced deliveries successfully redistributed!")
+
+        # Step 4: show new re-sequenced route times for all active vans
+        st.markdown("**Updated route estimates after re-optimization:**")
+        for van_id, van in working_fleet.items():
+            if van.capacity == 0 or not van.assigned_deliveries:
+                continue
+            route, est_min = sequence_route_for_vehicle(van)
+            st.write(f"  • **{van_id}**: {len(route)} stops — {int(est_min)} min estimated")
+
+        # Save updated fleet back to session
+        st.session_state.fleet = working_fleet
+
+
+# ============================================================================
+# PHASE 4: UI — appended as a new section after existing main() output
+# ============================================================================
+
+def phase4_render(fleet, deliveries, unassigned, unassigned_reasons):
+    """
+    Phase 4 — Renders all three Phase 4 sections below the existing UI.
+    Call this from main() after the existing content, passing the current
+    fleet and deliveries from session state.
+    """
+    st.markdown("---")
+    st.markdown("## 🆕 Phase 4 Features")
+
+    # Feature 1: Explainability Panel
+    phase4_explainability_panel(unassigned, unassigned_reasons, fleet)
+
+    st.markdown("---")
+
+    # Feature 2: Last-Minute Insertion
+    phase4_insert_last_minute_order(fleet, deliveries)
+
+    st.markdown("---")
+
+    # Feature 3: Route Re-Optimization
+    phase4_reoptimize_after_disruption(fleet)
 
 
 # ============================================================================
