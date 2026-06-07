@@ -221,7 +221,7 @@ class Vehicle:
     assigned_deliveries: List[Delivery] = field(default_factory=list)
     driver_start_time: int = 360  # Default 6:00 AM
     driver_hours_used: float = 0.5  # Initial 30 min for loading/prep
-    driver_hours_limit: float = 10.0  # EU legal max is 10 hours, try to stay under 8
+    driver_hours_limit: float = 7.0  # Operational shift target: 7 hours
 
 
 # ============================================================================
@@ -362,32 +362,32 @@ def create_fleet() -> Dict[str, Vehicle]:
         "Refrigerated-Van-1": Vehicle(
             id="Refrigerated-Van-1",
             type="Refrigerated",
-            capacity=45
+            capacity=15  # Small fridge van — realistic cold chain capacity
         ),
         "Large-Van-1": Vehicle(
             id="Large-Van-1",
             type="Ambient",
-            capacity=45
+            capacity=25
         ),
         "Large-Van-2": Vehicle(
             id="Large-Van-2",
             type="Ambient",
-            capacity=45
+            capacity=25
         ),
         "Small-Van-1": Vehicle(
             id="Small-Van-1",
             type="Ambient",
-            capacity=30
+            capacity=15
         ),
         "Small-Van-2": Vehicle(
             id="Small-Van-2",
             type="Ambient",
-            capacity=30
+            capacity=15
         ),
         "Small-Van-3": Vehicle(
             id="Small-Van-3",
             type="Ambient",
-            capacity=30
+            capacity=15
         ),
     }
     return fleet
@@ -420,7 +420,7 @@ def generate_deliveries(num_deliveries: int) -> List[Delivery]:
         delivery = Delivery(
             id=f"HOSP-{i+1:03d}",
             type="Hospital",
-            boxes=random.randint(1, 5),  # Small to medium load
+            boxes=random.randint(3, 7),  # Small to medium load
             time_window="before 9am (STRICT)",
             early_time=360,  # 6:00 AM
             late_time=540,   # 9:00 AM (STRICT constraint)
@@ -434,7 +434,7 @@ def generate_deliveries(num_deliveries: int) -> List[Delivery]:
         delivery = Delivery(
             id=f"TEMP-{i+1:03d}",
             type="Temperature-Sensitive",
-            boxes=random.randint(1, 3),  # Small load
+            boxes=random.randint(2, 4),  # Small load
             time_window="same-day (urgent)",
             early_time=360,  # 6:00 AM
             late_time=1080,  # 6:00 PM
@@ -448,7 +448,7 @@ def generate_deliveries(num_deliveries: int) -> List[Delivery]:
         delivery = Delivery(
             id=f"PHARM-{i+1:03d}",
             type="Pharmacy",
-            boxes=random.randint(1, 3),  # Small to medium
+            boxes=random.randint(2, 5),  # Small to medium
             time_window="same-day (flexible)",
             early_time=360,  # 6:00 AM
             late_time=1080,  # 6:00 PM
@@ -462,11 +462,11 @@ def generate_deliveries(num_deliveries: int) -> List[Delivery]:
     for d in deliveries:
         d.district = random.choice(district_list)  # Random Paris district
         if d.type == "Hospital":
-            d.service_time = random.randint(20, 30)
+            d.service_time = random.randint(25, 40)
         elif d.type == "Temperature-Sensitive":
-            d.service_time = random.randint(5, 10)
+            d.service_time = random.randint(10, 20)
         else:
-            d.service_time = random.randint(5, 10)
+            d.service_time = random.randint(8, 15)
 
     # Shuffle to simulate realistic order arrival throughout the morning
     random.shuffle(deliveries)
@@ -520,7 +520,7 @@ def assign_deliveries(
         fleet["Small-Van-3"].capacity = 0
     
     if chaos_mode.get("fridge_breakdown", False):
-        fleet["Refrigerated-Van-1"].capacity = 22
+        fleet["Refrigerated-Van-1"].capacity = 7
     
     unassigned_deliveries = []
     unassigned_reasons: Dict[str, str] = {}
@@ -534,30 +534,20 @@ def assign_deliveries(
         Returns:
             (arrival_time_minutes, travel_plus_service_minutes)
         """
-        if not van.assigned_deliveries:
-            # First delivery: start at warehouse, depart after loading (6:30am)
-            current_time = van.driver_start_time + 30
-            last_district = "Warehouse"
-        else:
-            # Estimate based on current deliveries
-            current_time = van.driver_start_time + 30  # Loading time
-            last_delivery = van.assigned_deliveries[-1]
-            last_district = last_delivery.district
-            
-            for d in van.assigned_deliveries:
-                current_time += d.service_time
-                # Add travel time from previous stop to this stop
-                if d != van.assigned_deliveries[0]:
-                    prev_d = van.assigned_deliveries[van.assigned_deliveries.index(d) - 1]
-                    travel = get_travel_time(prev_d.district, d.district, current_time)
-                    current_time += travel
-        
+        current_time = van.driver_start_time + 30  # 6:30am after loading
+        last_district = "Warehouse"
+
+        for d in van.assigned_deliveries:
+            travel = get_travel_time(last_district, d.district, current_time)
+            current_time += travel + d.service_time
+            last_district = d.district
+
         # Travel from last location to this delivery
         travel_to_delivery = get_travel_time(last_district, delivery.district, current_time)
         arrival_time = current_time + travel_to_delivery
         travel_plus_service = travel_to_delivery + delivery.service_time
         
-        return arrival_time, travel_plus_service
+        return int(arrival_time), travel_plus_service
     
     # ========================================================================
     # PRIORITY 1: Temperature-Sensitive → Refrigerated Van ONLY
@@ -968,10 +958,12 @@ def main():
         
         chaos_sick_driver = st.checkbox(
             "🤒 Driver Calls in Sick (Lose 1 Small Van)",
+            key="chaos_sick",
             help="One small van is removed from the fleet (capacity → 0)"
         )
         chaos_fridge_breakdown = st.checkbox(
             "❄️ Fridge Van Breakdown (Capacity -50%)",
+            key="chaos_fridge",
             help="Refrigerated van capacity drops from 45 to 22 boxes"
         )
         
@@ -987,10 +979,8 @@ def main():
     # MAIN CONTENT: DISPATCH RESULTS
     # ====================================================================
     if generate_plan:
-        # Use session state to store random seed for consistency
-        if 'seed' not in st.session_state:
-            st.session_state.seed = random.randint(0, 10000)
-        
+        # Generate a new seed each time the button is clicked
+        st.session_state.seed = random.randint(0, 10000)
         random.seed(st.session_state.seed)
         
         # Step 1: Initialize fleet and generate deliveries
