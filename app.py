@@ -976,7 +976,7 @@ def main():
             "while deferring flexible Pharmacy orders."
         )
     
-    # ====================================================================
+# ====================================================================
     # MAIN CONTENT: DISPATCH RESULTS
     # ====================================================================
     if generate_plan:
@@ -997,14 +997,29 @@ def main():
         # Step 3: Run the naive greedy heuristic
         fleet, unassigned, unassigned_reasons = assign_deliveries(deliveries, fleet, chaos_mode)
         
-        # Step 4: Calculate key metrics
+        # Step 4: Save EVERYTHING to session state so it survives button clicks
+        st.session_state.plan_generated = True
+        st.session_state.fleet = fleet
+        st.session_state.deliveries = deliveries
+        st.session_state.unassigned = unassigned
+        st.session_state.unassigned_reasons = unassigned_reasons
+
+
+    # ================================================================
+    # DRAW THE UI ONLY IF A PLAN HAS BEEN GENERATED
+    # ================================================================
+    if st.session_state.get("plan_generated", False):
+        # Load the latest data from session state
+        fleet = st.session_state.fleet
+        deliveries = st.session_state.deliveries
+        unassigned = st.session_state.unassigned
+        unassigned_reasons = st.session_state.unassigned_reasons
+
+        # Calculate key metrics
         total_deliveries = len(deliveries)
         assigned_count = total_deliveries - len(unassigned)
         failed_count = len(unassigned)
         assignment_rate = (assigned_count / total_deliveries * 100) if total_deliveries > 0 else 0
-
-        st.session_state.fleet = fleet
-        st.session_state.deliveries = deliveries
 
         # ================================================================
         # TOP SECTION: KEY PERFORMANCE INDICATORS
