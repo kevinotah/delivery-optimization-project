@@ -772,32 +772,43 @@ def sequence_route_for_vehicle(van: Vehicle) -> Tuple[List[Delivery], float]:
 # Repair heuristic: reassign deliveries from a disrupted van to remaining fleet
 # ------------------------------------------------------------------------------
 def repair_assign_from_van(original_fleet: Dict[str, Vehicle], disrupted_van_id: str) -> Tuple[Dict[str, Vehicle], List[Delivery], Dict[str, str]]:
-    """
-    Attempt to reassign deliveries from `disrupted_van_id` to other vehicles in the fleet.
-    Returns updated fleet, list of deliveries that could not be reassigned, and reasons.
-    """
     fleet = copy.deepcopy(original_fleet)
     if disrupted_van_id not in fleet:
         return fleet, [], {}
 
     disrupted = fleet[disrupted_van_id]
     deliveries_to_move = disrupted.assigned_deliveries.copy()
-    # Remove them from disrupted van
+    
+    # Remove them from disrupted van and take it out of service
     disrupted.assigned_deliveries = []
     disrupted.current_load = 0
-    # Mark disrupted van out of service
     disrupted.capacity = 0
 
     unassigned = []
     reasons: Dict[str, str] = {}
 
-    # Helper to try assign a delivery to a list of vans
+    # Helper to estimate time (same as main heuristic)
+    def estimate_arr_and_travel(van: Vehicle, delivery: Delivery) -> Tuple[int, float]:
+        current_time = van.driver_start_time + 30 
+        last_district = "Warehouse"
+        if van.assigned_deliveries:
+            last_district = van.assigned_deliveries[-1].district
+        travel = get_travel_time(last_district, delivery.district, current_time)
+        return int(current_time + travel), travel + delivery.service_time
+
+    # Helper that ACTUALLY checks your constraints
     def try_assign_to_list(delivery: Delivery, vans: List[Vehicle]) -> bool:
         for v in vans:
-            if v.capacity > 0 and v.current_load + delivery.boxes <= v.capacity:
-                v.current_load += delivery.boxes
-                v.assigned_deliveries.append(delivery)
-                return True
+            if v.capacity > 0:
+                arr_time, added_minutes = estimate_arr_and_travel(v, delivery)
+                feasible, reason = check_all_constraints(delivery, v, arr_time, added_minutes)
+                if feasible:
+                    v.current_load += delivery.boxes
+                    v.assigned_deliveries.append(delivery)
+                    v.driver_hours_used += added_minutes / 60.0
+                    return True
+                else:
+                    reasons[delivery.id] = reason # Log why it failed
         return False
 
     large_vans = [fleet[k] for k in fleet if k.startswith("Large-Van")]
@@ -807,25 +818,22 @@ def repair_assign_from_van(original_fleet: Dict[str, Vehicle], disrupted_van_id:
     for d in deliveries_to_move:
         assigned = False
         if d.type == "Temperature-Sensitive":
-            # Try refrigerated first
-            if fridge and fridge.capacity > 0 and fridge.current_load + d.boxes <= fridge.capacity:
-                fridge.current_load += d.boxes
-                fridge.assigned_deliveries.append(d)
-                assigned = True
+            if fridge and fridge.capacity > 0:
+                arr_time, add_min = estimate_arr_and_travel(fridge, d)
+                if check_all_constraints(d, fridge, arr_time, add_min)[0]:
+                    fridge.current_load += d.boxes
+                    fridge.assigned_deliveries.append(d)
+                    fridge.driver_hours_used += add_min / 60.0
+                    assigned = True
         elif d.type == "Hospital":
-            # Hospitals -> Large vans
             assigned = try_assign_to_list(d, large_vans)
-            if not assigned:
-                assigned = try_assign_to_list(d, small_vans)
+            if not assigned: assigned = try_assign_to_list(d, small_vans)
         else:
-            # Pharmacy -> small vans first, then large
             assigned = try_assign_to_list(d, small_vans)
-            if not assigned:
-                assigned = try_assign_to_list(d, large_vans)
+            if not assigned: assigned = try_assign_to_list(d, large_vans)
 
         if not assigned:
             unassigned.append(d)
-            reasons[d.id] = "No capacity after disruption"
 
     return fleet, unassigned, reasons
 
@@ -920,7 +928,7 @@ def main():
     )
     
     # Page header
-    st.title("🚚 Dynamic Dispatch Simulator")
+    st.title("Dynamic Dispatch Simulator")
     st.markdown(
         "**Interactive Prototype for Medical Delivery Optimization (Paris)**\n\n"
         "This system demonstrates a **priority-based greedy algorithm** that "
@@ -931,11 +939,11 @@ def main():
     # SIDEBAR: USER CONTROLS
     # ====================================================================
     with st.sidebar:
-        st.header("⚙️ Dispatch Controls")
+        st.header("Dispatch Controls")
         
         # Input 1: Slider for number of deliveries
         num_deliveries = st.slider(
-            "📦 Daily Deliveries",
+            "Daily Deliveries",
             min_value=30,
             max_value=70,
             value=50,
@@ -946,7 +954,7 @@ def main():
         # Input 2: Generate button
         st.markdown("---")
         generate_plan = st.button(
-            "🎯 Generate Monday Dispatch Plan",
+            "Generate Morning Dispatch Plan",
             use_container_width=True,
             type="primary",
             help="Click to run the dispatch algorithm with current settings"
@@ -954,16 +962,16 @@ def main():
         
         # Input 3 & 4: Chaos mode toggles
         st.markdown("---")
-        st.subheader("⚡ Chaos Mode (Real-World Scenarios)")
+        st.subheader("Chaos Mode (Real-World Scenarios)")
         st.caption("Simulate disruptions to see algorithm resilience")
         
         chaos_sick_driver = st.checkbox(
-            "🤒 Driver Calls in Sick (Lose 1 Small Van)",
+            "Driver Calls in Sick (Lose 1 Small Van)",
             key="chaos_sick",
             help="One small van is removed from the fleet (capacity → 0)"
         )
         chaos_fridge_breakdown = st.checkbox(
-            "❄️ Fridge Van Breakdown (Capacity -50%)",
+            "Fridge Van Breakdown (Capacity -50%)",
             key="chaos_fridge",
             help="Refrigerated van capacity drops from 45 to 22 boxes"
         )
@@ -1024,7 +1032,9 @@ def main():
         # ================================================================
         # TOP SECTION: KEY PERFORMANCE INDICATORS
         # ================================================================
-        st.markdown("### 📊 Dispatch Summary")
+        
+        st.markdown("---")
+        st.markdown("### Dispatch Summary")
         col1, col2, col3, col4 = st.columns(4)
         
         with col1:
@@ -1198,46 +1208,33 @@ def main():
     # Repair simulation controls
         st.markdown("---")
         st.markdown("### 🛠️ Repair Simulation")
-        st.caption("Simulate a disruption after the morning plan and attempt an automatic repair (reassignment)")
+        st.caption("Simulate a van breaking down mid-route and attempt constraint-aware reassignment.")
         
-        # Only show vans that actually have deliveries assigned to them!
         active_vans = [v_id for v_id, v in fleet.items() if v.current_load > 0]
         
         if not active_vans:
             st.warning("No active vans to simulate a breakdown on.")
         else:
-            repair_event = st.selectbox("Select a van to break down mid-route:", active_vans)
+            repair_event = st.selectbox("Select a van to break down:", active_vans)
             run_repair = st.button("🔁 Simulate Disruption & Run Repair")
 
             if run_repair:
                 baseline_fleet = st.session_state.fleet
-                # Break down the selected van dynamically
                 repaired_fleet, newly_unassigned, repair_reasons = repair_assign_from_van(baseline_fleet, repair_event)
 
-                # Metrics before vs after
-                before_assigned = sum(len(v.assigned_deliveries) for v in baseline_fleet.values())
-                after_assigned = sum(len(v.assigned_deliveries) for v in repaired_fleet.values())
-                st.markdown(f"**Before repair:** {before_assigned} assigned — **After repair:** {after_assigned} assigned")
-
+                # Update the master session state!
+                st.session_state.fleet = repaired_fleet
+                
+                # Add the newly failed deliveries to the global deferred list
                 if newly_unassigned:
-                    st.warning(f"{len(newly_unassigned)} delivery(ies) could not be reassigned after the disruption.")
-                else:
-                    st.success("All deliveries from the disrupted vehicle were successfully reassigned to other vans!")
-
-                # Show summary of moved deliveries
-                moved = []
-                orig_assign = {v.id: [dd.id for dd in v.assigned_deliveries] for v in baseline_fleet.values()}
-                new_assign = {v.id: [dd.id for dd in v.assigned_deliveries] for v in repaired_fleet.values()}
-                for vid in new_assign:
-                    # compare lists
-                    added = set(new_assign[vid]) - set(orig_assign.get(vid, []))
-                    if added:
-                        moved.extend(list(added))
-
-                if moved:
-                    st.markdown(f"**Reassigned deliveries ({len(moved)}):**")
-                    for mid in moved[:20]:
-                        st.write(f"• {mid}")
+                    st.session_state.unassigned.extend(newly_unassigned)
+                    st.session_state.unassigned_reasons.update(repair_reasons)
+                
+                # Send a quick popup notification that survives the page reload
+                st.toast(f"🚨 Van {repair_event} broke down! Rerouting deliveries...", icon="🔄")
+                
+                # Force the whole app to redraw with the new data instantly
+                st.rerun()
         
         # ================================================================
         # INSIGHTS & EXPLANATION
@@ -1302,7 +1299,7 @@ def phase4_explainability_panel(unassigned, unassigned_reasons, fleet):
     could not be assigned, and what would be needed to fix it.
     Uses the existing generate_explainability_report() engine from Phase 2.
     """
-    st.markdown("### 🔍 Explainability Panel")
+    st.markdown("### Explainability Panel")
     st.caption("Detailed breakdown of why each deferred delivery could not be assigned.")
 
     if not unassigned:
@@ -1393,7 +1390,7 @@ def phase4_insert_last_minute_order(fleet, current_deliveries):
     small_vans = [fleet["Small-Van-1"], fleet["Small-Van-2"], fleet["Small-Van-3"]]
     fridge_van = fleet["Refrigerated-Van-1"]
 
-    st.markdown("### 🚨 Last-Minute Order Insertion")
+    st.markdown("### Last-Minute Order Insertion")
     st.caption("Add a new delivery order to the existing plan after it has already been generated.")
 
     with st.form("last_minute_form"):
@@ -1464,7 +1461,7 @@ def phase4_reoptimize_after_disruption(fleet):
     Args:
         fleet: Current fleet dict (from session state)
     """
-    st.markdown("### 🔄 Route Re-Optimization Post-Disruption")
+    st.markdown("### Route Re-Optimization Post-Disruption")
     st.caption(
         "More advanced than the basic repair: after removing a van, this re-sequences "
         "all remaining routes using the travel-time matrix for tighter estimates."
@@ -1558,7 +1555,6 @@ def phase4_render(fleet, deliveries, unassigned, unassigned_reasons):
     fleet and deliveries from session state.
     """
     st.markdown("---")
-    st.markdown("## 🆕 Phase 4 Features")
 
     # Feature 1: Explainability Panel
     phase4_explainability_panel(unassigned, unassigned_reasons, fleet)
