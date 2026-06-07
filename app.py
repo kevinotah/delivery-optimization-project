@@ -23,6 +23,7 @@ This ensures critical medical deliveries are NEVER sacrificed for convenience it
 import streamlit as st
 import pandas as pd
 import random
+import io
 from typing import List, Dict, Tuple
 from dataclasses import dataclass, field
 import copy
@@ -1039,11 +1040,11 @@ def main():
                 help="Percentage of orders assigned in morning dispatch"
             )
         
-        # ================================================================
+# ================================================================
         # FLEET VISUALIZATION: 6 VAN CARDS
         # ================================================================
         st.markdown("### 🚐 Fleet Utilization & Assignments")
-        st.markdown("Each card shows a vehicle, its load, and what's inside.")
+        st.markdown("Click on any vehicle dropdown to see its load, route, and details.")
         
         van_ids = list(fleet.keys())
         
@@ -1054,10 +1055,13 @@ def main():
         for idx, van_id in enumerate(van_ids[:3]):
             van = fleet[van_id]
             with cols[idx]:
-                with st.container(border=True):
-                    # Van header with icon
-                    icon = "❄️" if van.type == "Refrigerated" else "📦"
-                    st.write(f"**{icon} {van.id}**")
+                icon = "❄️" if van.type == "Refrigerated" else "📦"
+                
+                # Make the title of the dropdown show the Van ID and its current load
+                expander_title = f"{icon} {van.id} ({van.current_load}/{van.capacity} boxes)"
+                
+                # Use st.expander instead of st.container to create the dropdown
+                with st.expander(expander_title, expanded=False):
                     st.caption(f"{van.type} | Capacity: {van.capacity} boxes")
                     
                     # Capacity progress bar
@@ -1102,10 +1106,11 @@ def main():
         for idx, van_id in enumerate(van_ids[3:]):
             van = fleet[van_id]
             with cols[idx]:
-                with st.container(border=True):
-                    # Van header with icon
-                    icon = "❄️" if van.type == "Refrigerated" else "📦"
-                    st.write(f"**{icon} {van.id}**")
+                icon = "❄️" if van.type == "Refrigerated" else "📦"
+                
+                expander_title = f"{icon} {van.id} ({van.current_load}/{van.capacity} boxes)"
+                
+                with st.expander(expander_title, expanded=False):
                     st.caption(f"{van.type} | Capacity: {van.capacity} boxes")
                     
                     # Capacity progress bar
