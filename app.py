@@ -222,7 +222,7 @@ class Vehicle:
     assigned_deliveries: List[Delivery] = field(default_factory=list)
     driver_start_time: int = 360  # Default 6:00 AM
     driver_hours_used: float = 0.5  # Initial 30 min for loading/prep
-    driver_hours_limit: float = 7.0  # Operational shift target: 7 hours
+    driver_hours_limit: float = 10.0  # Legal max shift: 10 hours
 
 
 # ============================================================================
@@ -363,32 +363,32 @@ def create_fleet() -> Dict[str, Vehicle]:
         "Refrigerated-Van-1": Vehicle(
             id="Refrigerated-Van-1",
             type="Refrigerated",
-            capacity=15  # Small fridge van — realistic cold chain capacity
+            capacity=45
         ),
         "Large-Van-1": Vehicle(
             id="Large-Van-1",
             type="Ambient",
-            capacity=25
+            capacity=45
         ),
         "Large-Van-2": Vehicle(
             id="Large-Van-2",
             type="Ambient",
-            capacity=25
+            capacity=45
         ),
         "Small-Van-1": Vehicle(
             id="Small-Van-1",
             type="Ambient",
-            capacity=15
+            capacity=30
         ),
         "Small-Van-2": Vehicle(
             id="Small-Van-2",
             type="Ambient",
-            capacity=15
+            capacity=30
         ),
         "Small-Van-3": Vehicle(
             id="Small-Van-3",
             type="Ambient",
-            capacity=15
+            capacity=30
         ),
     }
     return fleet
@@ -521,7 +521,7 @@ def assign_deliveries(
         fleet["Small-Van-3"].capacity = 0
     
     if chaos_mode.get("fridge_breakdown", False):
-        fleet["Refrigerated-Van-1"].capacity = 7
+        fleet["Refrigerated-Van-1"].capacity = 22
     
     unassigned_deliveries = []
     unassigned_reasons: Dict[str, str] = {}
@@ -1180,25 +1180,24 @@ def main():
                     if len(delivery_list) > 5:
                         st.write(f"  ... and {len(delivery_list) - 5} more")
         
-        # Repair simulation controls
+    # Repair simulation controls
         st.markdown("---")
         st.markdown("### 🛠️ Repair Simulation")
         st.caption("Simulate a disruption after the morning plan and attempt an automatic repair (reassignment)")
-        repair_event = st.selectbox("Select disruption to simulate:", ["Driver Calls in Sick (Small-Van-3)", "Refrigerated Van Breakdown (Refrigerated-Van-1)"])
-        run_repair = st.button("🔁 Simulate Disruption & Run Repair")
+        
+        # Only show vans that actually have deliveries assigned to them!
+        active_vans = [v_id for v_id, v in fleet.items() if v.current_load > 0]
+        
+        if not active_vans:
+            st.warning("No active vans to simulate a breakdown on.")
+        else:
+            repair_event = st.selectbox("Select a van to break down mid-route:", active_vans)
+            run_repair = st.button("🔁 Simulate Disruption & Run Repair")
 
-        if run_repair:
-            # Use the session state's fleet (current plan) as baseline
-            if 'fleet' not in st.session_state or 'deliveries' not in st.session_state:
-                st.error("No plan in session to simulate. Generate a plan first.")
-            else:
+            if run_repair:
                 baseline_fleet = st.session_state.fleet
-                if repair_event.startswith("Driver Calls in Sick"):
-                    disrupted_id = "Small-Van-3"
-                else:
-                    disrupted_id = "Refrigerated-Van-1"
-
-                repaired_fleet, newly_unassigned, repair_reasons = repair_assign_from_van(baseline_fleet, disrupted_id)
+                # Break down the selected van dynamically
+                repaired_fleet, newly_unassigned, repair_reasons = repair_assign_from_van(baseline_fleet, repair_event)
 
                 # Metrics before vs after
                 before_assigned = sum(len(v.assigned_deliveries) for v in baseline_fleet.values())
@@ -1207,10 +1206,8 @@ def main():
 
                 if newly_unassigned:
                     st.warning(f"{len(newly_unassigned)} delivery(ies) could not be reassigned after the disruption.")
-                    for d in newly_unassigned[:10]:
-                        st.write(f"• {d.id} ({d.type}) — {repair_reasons.get(d.id, '')}")
                 else:
-                    st.success("All deliveries from the disrupted vehicle were successfully reassigned.")
+                    st.success("All deliveries from the disrupted vehicle were successfully reassigned to other vans!")
 
                 # Show summary of moved deliveries
                 moved = []
