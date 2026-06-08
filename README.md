@@ -4,7 +4,7 @@
 
 This interactive prototype demonstrates a **custom, naive greedy heuristic** for vehicle routing with constraints (VRPTW). It is designed to present to a non-technical CEO and showcase how an automated system prioritizes **reliability** (hitting strict hospital time windows) over efficiency (fuel savings).
 
----
+---      
 
 ## Project Context
 
